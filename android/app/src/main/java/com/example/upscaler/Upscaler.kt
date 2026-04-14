@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.nnapi.NnApiDelegate
 import java.io.FileInputStream
@@ -26,6 +27,8 @@ class Upscaler(
     val outputWidth: Int
     val outputHeight: Int
     val modelScale: Int
+    private val inputDataType: DataType
+    private val outputDataType: DataType
 
     init {
         val modelBuffer = loadModelFile(context, modelFileName)
@@ -39,10 +42,12 @@ class Upscaler(
         val inputShape = interpreter.getInputTensor(0).shape() // [1, H, W, 3]
         inputHeight = inputShape[1]
         inputWidth = inputShape[2]
+        inputDataType = interpreter.getInputTensor(0).dataType()
 
         val outputShape = interpreter.getOutputTensor(0).shape() // [1, H, W, 3]
         outputHeight = outputShape[1]
         outputWidth = outputShape[2]
+        outputDataType = interpreter.getOutputTensor(0).dataType()
         modelScale = outputWidth / inputWidth
     }
 
@@ -61,13 +66,22 @@ class Upscaler(
     /**
      * Runs the model on the given input and returns the execution time in milliseconds.
      * Output is written into [output], which must be sized to match the model's output tensor.
+     * Handles both FLOAT32 and UINT8/INT8 quantized models transparently.
      */
     fun runInference(input: FloatArray, output: FloatArray): Long {
-        val inputBuffer = ByteBuffer.allocateDirect(input.size * 4).apply {
+        val bytesPerInputElement = if (inputDataType == DataType.FLOAT32) 4 else 1
+        val bytesPerOutputElement = if (outputDataType == DataType.FLOAT32) 4 else 1
+
+        val inputBuffer = ByteBuffer.allocateDirect(input.size * bytesPerInputElement).apply {
             order(ByteOrder.nativeOrder())
-            asFloatBuffer().put(input)
+            when (inputDataType) {
+                DataType.FLOAT32 -> asFloatBuffer().put(input)
+                DataType.UINT8 -> input.forEach { put(it.toInt().coerceIn(0, 255).toByte()) }
+                DataType.INT8 -> input.forEach { put((it.toInt().coerceIn(0, 255) - 128).toByte()) }
+                else -> throw IllegalStateException("Unsupported input data type: $inputDataType")
+            }
         }
-        val outputBuffer = ByteBuffer.allocateDirect(output.size * 4).apply {
+        val outputBuffer = ByteBuffer.allocateDirect(output.size * bytesPerOutputElement).apply {
             order(ByteOrder.nativeOrder())
         }
 
@@ -76,7 +90,12 @@ class Upscaler(
         }
 
         outputBuffer.rewind()
-        outputBuffer.asFloatBuffer().get(output)
+        when (outputDataType) {
+            DataType.FLOAT32 -> outputBuffer.asFloatBuffer().get(output)
+            DataType.UINT8 -> output.indices.forEach { output[it] = (outputBuffer.get().toInt() and 0xFF).toFloat() }
+            DataType.INT8 -> output.indices.forEach { output[it] = ((outputBuffer.get().toInt() and 0xFF)).toFloat() }
+            else -> throw IllegalStateException("Unsupported output data type: $outputDataType")
+        }
         return elapsedMs
     }
 

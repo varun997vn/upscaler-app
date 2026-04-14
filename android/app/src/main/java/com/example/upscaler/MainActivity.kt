@@ -30,6 +30,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
@@ -39,7 +40,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private const val MODEL_FILE = "esrgan.tflite"
+private val MODELS = listOf(
+    "esrgan.tflite" to "Standard (FP32)",
+    "esrgan_int8.tflite" to "Quantized (INT8)",
+)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -60,12 +64,25 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    val upscaler = remember { Upscaler(context, MODEL_FILE, useNpu = false) }
+    var selectedModel by remember { mutableStateOf(MODELS[0].first) }
+    var upscaler by remember { mutableStateOf<Upscaler?>(null) }
     var selectedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var upscaledBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var status by remember { mutableStateOf("Pick a low-res image to upscale.") }
+    var status by remember { mutableStateOf("Loading model...") }
     var running by remember { mutableStateOf(false) }
     var scale by remember { mutableStateOf(4) }
+
+    // Recreate the Upscaler whenever the selected model changes; close the previous one.
+    LaunchedEffect(selectedModel) {
+        val old = upscaler
+        status = "Loading model..."
+        upscaledBitmap = null
+        val new = withContext(Dispatchers.IO) { Upscaler(context, selectedModel, useNpu = false) }
+        upscaler = new
+        old?.close()
+        status = "Ready. Model tile: ${new.inputWidth}x${new.inputHeight} → " +
+            "${new.outputWidth}x${new.outputHeight} (native ${new.modelScale}x)."
+    }
 
     val pickImage = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent(),
@@ -74,15 +91,15 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
             context.contentResolver.openInputStream(uri)?.use { stream ->
                 selectedBitmap = BitmapFactory.decodeStream(stream)
                 upscaledBitmap = null
-                status = "Image loaded: ${selectedBitmap?.width}x${selectedBitmap?.height}. " +
-                    "Model input: ${upscaler.inputWidth}x${upscaler.inputHeight}."
+                val u = upscaler
+                status = if (u != null) {
+                    "Image loaded: ${selectedBitmap?.width}x${selectedBitmap?.height}. " +
+                        "Model input: ${u.inputWidth}x${u.inputHeight}."
+                } else {
+                    "Image loaded: ${selectedBitmap?.width}x${selectedBitmap?.height}."
+                }
             }
         }
-    }
-
-    LaunchedEffect(Unit) {
-        status = "Ready. Model tile: ${upscaler.inputWidth}x${upscaler.inputHeight} → " +
-            "${upscaler.outputWidth}x${upscaler.outputHeight} (native ${upscaler.modelScale}x)."
     }
 
     Column(
@@ -94,6 +111,23 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
     ) {
         Text(text = status)
 
+        Text("Model:")
+        MODELS.forEach { (fileName, displayName) ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .selectable(
+                        selected = selectedModel == fileName,
+                        enabled = !running,
+                        onClick = { selectedModel = fileName },
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = selectedModel == fileName, onClick = null)
+                Text(displayName)
+            }
+        }
+
         Button(
             onClick = { pickImage.launch("image/*") },
             enabled = !running,
@@ -103,6 +137,7 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("Scale:")
             listOf(2, 3, 4).forEach { value ->
@@ -112,7 +147,7 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
                         enabled = !running,
                         onClick = { scale = value },
                     ),
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     RadioButton(selected = scale == value, onClick = null)
                     Text("${value}x")
@@ -123,12 +158,13 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
         Button(
             onClick = {
                 val bmp = selectedBitmap ?: return@Button
+                val u = upscaler ?: return@Button
                 val chosenScale = scale
                 running = true
                 status = "Running inference at ${chosenScale}x..."
                 scope.launch {
                     val result = withContext(Dispatchers.Default) {
-                        upscaler.upscale(bmp, chosenScale.toFloat())
+                        u.upscale(bmp, chosenScale.toFloat())
                     }
                     upscaledBitmap = result.bitmap
                     status = "Inference took ${result.inferenceTimeMs} ms. " +
@@ -136,7 +172,7 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
                     running = false
                 }
             },
-            enabled = selectedBitmap != null && !running,
+            enabled = selectedBitmap != null && upscaler != null && !running,
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Upscale") }
 
