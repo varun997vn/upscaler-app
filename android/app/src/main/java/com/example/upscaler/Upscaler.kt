@@ -34,7 +34,14 @@ class Upscaler(
         val modelBuffer = loadModelFile(context, modelFileName)
         val options = Interpreter.Options()
         if (useNpu) {
-            nnApiDelegate = NnApiDelegate()
+            // setAllowFp16: Hexagon DSP requires FP16; without this, NNAPI silently reroutes
+            // every FP32 op back to CPU on Snapdragon.
+            // setUseNnapiCpu(false): disable silent CPU fallback so failures surface as errors.
+            val nnApiOptions = NnApiDelegate.Options()
+                .setAllowFp16(true)
+                .setExecutionPreference(NnApiDelegate.Options.EXECUTION_PREFERENCE_SUSTAINED_SPEED)
+                .setUseNnapiCpu(false)
+            nnApiDelegate = NnApiDelegate(nnApiOptions)
             options.addDelegate(nnApiDelegate)
         }
         interpreter = Interpreter(modelBuffer, options)
