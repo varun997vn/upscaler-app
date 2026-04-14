@@ -1,6 +1,6 @@
 # Gradle
 .gradle/
-/build/
+**/build/
 /captures/
 *.iml
 
@@ -11,8 +11,8 @@
 !/.idea/dictionaries
 
 # Android build outputs
-/app/build/
-/app/release/
+/android/app/build/
+/android/app/release/
 *.apk
 *.aab
 *.ap_
@@ -40,3 +40,16 @@ keystore.properties
 Thumbs.db
 .vscode/
 .kotlin/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ML artifacts / caches
+/ml/tfhub_cache/
+/ml/esrgan_saved_model/
+*.tflite
