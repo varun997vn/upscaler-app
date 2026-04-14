@@ -4,8 +4,12 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.util.Log
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.gpu.CompatibilityList
+import org.tensorflow.lite.gpu.GpuDelegate
+import org.tensorflow.lite.gpu.GpuDelegateFactory
 import org.tensorflow.lite.nnapi.NnApiDelegate
 import java.io.FileInputStream
 import java.nio.ByteBuffer
@@ -14,13 +18,18 @@ import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.system.measureTimeMillis
 
+private const val TAG = "NpuDiag"
+
+enum class Accelerator { CPU, GPU, NPU }
+
 class Upscaler(
     context: Context,
     modelFileName: String,
-    private val useNpu: Boolean = false,
+    private val accelerator: Accelerator = Accelerator.CPU,
 ) {
     private val interpreter: Interpreter
     private var nnApiDelegate: NnApiDelegate? = null
+    private var gpuDelegate: GpuDelegate? = null
 
     val inputWidth: Int
     val inputHeight: Int
@@ -30,20 +39,64 @@ class Upscaler(
     private val inputDataType: DataType
     private val outputDataType: DataType
 
+    /** Human-readable status of the chosen accelerator (visible in UI). */
+    val npuStatus: String
+
     init {
         val modelBuffer = loadModelFile(context, modelFileName)
         val options = Interpreter.Options()
-        if (useNpu) {
-            // setAllowFp16: Hexagon DSP requires FP16; without this, NNAPI silently reroutes
-            // every FP32 op back to CPU on Snapdragon.
-            // setUseNnapiCpu(false): disable silent CPU fallback so failures surface as errors.
-            val nnApiOptions = NnApiDelegate.Options()
-                .setAllowFp16(true)
-                .setExecutionPreference(NnApiDelegate.Options.EXECUTION_PREFERENCE_SUSTAINED_SPEED)
-                .setUseNnapiCpu(false)
-            nnApiDelegate = NnApiDelegate(nnApiOptions)
-            options.addDelegate(nnApiDelegate)
+        // Multi-threaded CPU path (XNNPACK is enabled by default in TFLite 2.16).
+        // Setting threads also helps for the ops that fall back to CPU under NNAPI/GPU.
+        options.numThreads = Runtime.getRuntime().availableProcessors().coerceAtMost(4)
+
+        npuStatus = when (accelerator) {
+            Accelerator.CPU -> {
+                Log.i(TAG, "Using CPU (XNNPACK), threads=${options.numThreads}")
+                "CPU (XNNPACK, ${options.numThreads}t)"
+            }
+
+            Accelerator.GPU -> {
+                val compat = CompatibilityList()
+                if (!compat.isDelegateSupportedOnThisDevice) {
+                    Log.w(TAG, "GPU delegate NOT supported on this device — falling back to CPU")
+                    "GPU NOT SUPPORTED (CPU fallback)"
+                } else {
+                    try {
+                        // Pick the options that the OpenCL/OpenGL backend reports as best for this GPU.
+                        // On Adreno this chooses OpenCL + FP16 which is where the 3–10x wins come from.
+                        val gpuOpts: GpuDelegateFactory.Options = compat.bestOptionsForThisDevice
+                        gpuDelegate = GpuDelegate(gpuOpts)
+                        options.addDelegate(gpuDelegate)
+                        Log.i(TAG, "GPU delegate attached (Adreno/Mali via OpenCL/OpenGL)")
+                        "GPU delegate attached"
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "GPU delegate init FAILED — CPU fallback: ${e.message}", e)
+                        gpuDelegate?.close(); gpuDelegate = null
+                        "GPU FAILED (CPU): ${e.message}"
+                    }
+                }
+            }
+
+            Accelerator.NPU -> {
+                try {
+                    // Permissive options: let NNAPI partition the graph. Ops the hardware can't
+                    // handle stay on CPU rather than killing the whole run. allowFp16 lets the
+                    // Hexagon/NPU run FP32 graphs at FP16 precision (required for acceleration).
+                    val nnApiOptions = NnApiDelegate.Options()
+                        .setAllowFp16(true)
+                        .setExecutionPreference(NnApiDelegate.Options.EXECUTION_PREFERENCE_SUSTAINED_SPEED)
+                    nnApiDelegate = NnApiDelegate(nnApiOptions)
+                    options.addDelegate(nnApiDelegate)
+                    Log.i(TAG, "NNAPI delegate attached — model=$modelFileName")
+                    "NNAPI delegate attached"
+                } catch (e: Throwable) {
+                    Log.e(TAG, "NNAPI delegate init FAILED — CPU fallback: ${e.message}", e)
+                    nnApiDelegate?.close(); nnApiDelegate = null
+                    "NNAPI FAILED (CPU): ${e.message}"
+                }
+            }
         }
+
         interpreter = Interpreter(modelBuffer, options)
 
         val inputShape = interpreter.getInputTensor(0).shape() // [1, H, W, 3]
@@ -56,6 +109,10 @@ class Upscaler(
         outputWidth = outputShape[2]
         outputDataType = interpreter.getOutputTensor(0).dataType()
         modelScale = outputWidth / inputWidth
+
+        Log.i(TAG, "Upscaler ready — accelerator=$accelerator status=$npuStatus " +
+            "input=${inputWidth}x${inputHeight} output=${outputWidth}x${outputHeight} " +
+            "dtype=$inputDataType model=$modelFileName")
     }
 
     private fun loadModelFile(context: Context, fileName: String): MappedByteBuffer {
@@ -95,6 +152,7 @@ class Upscaler(
         val elapsedMs = measureTimeMillis {
             interpreter.run(inputBuffer, outputBuffer)
         }
+        Log.d(TAG, "Inference ${elapsedMs}ms — delegate=$npuStatus")
 
         outputBuffer.rewind()
         when (outputDataType) {
@@ -178,8 +236,8 @@ class Upscaler(
 
     fun close() {
         interpreter.close()
-        nnApiDelegate?.close()
-        nnApiDelegate = null
+        nnApiDelegate?.close(); nnApiDelegate = null
+        gpuDelegate?.close(); gpuDelegate = null
     }
 }
 

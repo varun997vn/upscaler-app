@@ -22,7 +22,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -66,7 +65,7 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
 
     var selectedModel by remember { mutableStateOf(MODELS[0].first) }
-    var useNpu by remember { mutableStateOf(false) }
+    var accelerator by remember { mutableStateOf(Accelerator.CPU) }
     var upscaler by remember { mutableStateOf<Upscaler?>(null) }
     var selectedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var upscaledBitmap by remember { mutableStateOf<Bitmap?>(null) }
@@ -74,16 +73,16 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
     var running by remember { mutableStateOf(false) }
     var scale by remember { mutableStateOf(4) }
 
-    // Recreate the Upscaler whenever the selected model or NPU setting changes; close the previous one.
-    LaunchedEffect(selectedModel, useNpu) {
+    // Recreate the Upscaler whenever the model or accelerator changes; close the previous one.
+    LaunchedEffect(selectedModel, accelerator) {
         val old = upscaler
         status = "Loading model..."
         upscaledBitmap = null
-        val new = withContext(Dispatchers.IO) { Upscaler(context, selectedModel, useNpu = useNpu) }
+        val new = withContext(Dispatchers.IO) { Upscaler(context, selectedModel, accelerator = accelerator) }
         upscaler = new
         old?.close()
-        status = "Ready. Model tile: ${new.inputWidth}x${new.inputHeight} → " +
-            "${new.outputWidth}x${new.outputHeight} (native ${new.modelScale}x)."
+        status = "Ready [${new.npuStatus}]. " +
+            "Tile: ${new.inputWidth}x${new.inputHeight} → ${new.outputWidth}x${new.outputHeight}."
     }
 
     val pickImage = rememberLauncherForActivityResult(
@@ -157,17 +156,25 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
             }
         }
 
+        Text("Accelerator:")
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Use NPU (NNAPI / Hexagon)")
-            Switch(
-                checked = useNpu,
-                onCheckedChange = { useNpu = it },
-                enabled = !running,
-            )
+            Accelerator.entries.forEach { opt ->
+                Row(
+                    modifier = Modifier.selectable(
+                        selected = accelerator == opt,
+                        enabled = !running,
+                        onClick = { accelerator = opt },
+                    ),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(selected = accelerator == opt, onClick = null)
+                    Text(opt.name)
+                }
+            }
         }
 
         Button(
@@ -182,7 +189,7 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
                         u.upscale(bmp, chosenScale.toFloat())
                     }
                     upscaledBitmap = result.bitmap
-                    status = "Inference took ${result.inferenceTimeMs} ms. " +
+                    status = "Inference ${result.inferenceTimeMs} ms [${u.npuStatus}]. " +
                         "Output: ${result.bitmap.width}x${result.bitmap.height} (${chosenScale}x)."
                     running = false
                 }
