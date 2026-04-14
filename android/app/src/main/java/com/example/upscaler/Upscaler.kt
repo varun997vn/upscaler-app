@@ -10,7 +10,6 @@ import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
 import org.tensorflow.lite.gpu.GpuDelegateFactory
-import org.tensorflow.lite.nnapi.NnApiDelegate
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -18,9 +17,9 @@ import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.system.measureTimeMillis
 
-private const val TAG = "NpuDiag"
+private const val TAG = "Upscaler"
 
-enum class Accelerator { CPU, GPU, NPU }
+enum class Accelerator { CPU, GPU }
 
 class Upscaler(
     context: Context,
@@ -28,7 +27,6 @@ class Upscaler(
     private val accelerator: Accelerator = Accelerator.CPU,
 ) {
     private val interpreter: Interpreter
-    private var nnApiDelegate: NnApiDelegate? = null
     private var gpuDelegate: GpuDelegate? = null
 
     val inputWidth: Int
@@ -40,16 +38,14 @@ class Upscaler(
     private val outputDataType: DataType
 
     /** Human-readable status of the chosen accelerator (visible in UI). */
-    val npuStatus: String
+    val acceleratorStatus: String
 
     init {
         val modelBuffer = loadModelFile(context, modelFileName)
         val options = Interpreter.Options()
-        // Multi-threaded CPU path (XNNPACK is enabled by default in TFLite 2.16).
-        // Setting threads also helps for the ops that fall back to CPU under NNAPI/GPU.
         options.numThreads = Runtime.getRuntime().availableProcessors().coerceAtMost(4)
 
-        npuStatus = when (accelerator) {
+        acceleratorStatus = when (accelerator) {
             Accelerator.CPU -> {
                 Log.i(TAG, "Using CPU (XNNPACK), threads=${options.numThreads}")
                 "CPU (XNNPACK, ${options.numThreads}t)"
@@ -62,37 +58,16 @@ class Upscaler(
                     "GPU NOT SUPPORTED (CPU fallback)"
                 } else {
                     try {
-                        // Pick the options that the OpenCL/OpenGL backend reports as best for this GPU.
-                        // On Adreno this chooses OpenCL + FP16 which is where the 3–10x wins come from.
                         val gpuOpts: GpuDelegateFactory.Options = compat.bestOptionsForThisDevice
                         gpuDelegate = GpuDelegate(gpuOpts)
                         options.addDelegate(gpuDelegate)
-                        Log.i(TAG, "GPU delegate attached (Adreno/Mali via OpenCL/OpenGL)")
+                        Log.i(TAG, "GPU delegate attached (OpenCL/OpenGL)")
                         "GPU delegate attached"
                     } catch (e: Throwable) {
                         Log.e(TAG, "GPU delegate init FAILED — CPU fallback: ${e.message}", e)
                         gpuDelegate?.close(); gpuDelegate = null
                         "GPU FAILED (CPU): ${e.message}"
                     }
-                }
-            }
-
-            Accelerator.NPU -> {
-                try {
-                    // Permissive options: let NNAPI partition the graph. Ops the hardware can't
-                    // handle stay on CPU rather than killing the whole run. allowFp16 lets the
-                    // Hexagon/NPU run FP32 graphs at FP16 precision (required for acceleration).
-                    val nnApiOptions = NnApiDelegate.Options()
-                        .setAllowFp16(true)
-                        .setExecutionPreference(NnApiDelegate.Options.EXECUTION_PREFERENCE_SUSTAINED_SPEED)
-                    nnApiDelegate = NnApiDelegate(nnApiOptions)
-                    options.addDelegate(nnApiDelegate)
-                    Log.i(TAG, "NNAPI delegate attached — model=$modelFileName")
-                    "NNAPI delegate attached"
-                } catch (e: Throwable) {
-                    Log.e(TAG, "NNAPI delegate init FAILED — CPU fallback: ${e.message}", e)
-                    nnApiDelegate?.close(); nnApiDelegate = null
-                    "NNAPI FAILED (CPU): ${e.message}"
                 }
             }
         }
@@ -110,7 +85,7 @@ class Upscaler(
         outputDataType = interpreter.getOutputTensor(0).dataType()
         modelScale = outputWidth / inputWidth
 
-        Log.i(TAG, "Upscaler ready — accelerator=$accelerator status=$npuStatus " +
+        Log.i(TAG, "Upscaler ready — accelerator=$accelerator status=$acceleratorStatus " +
             "input=${inputWidth}x${inputHeight} output=${outputWidth}x${outputHeight} " +
             "dtype=$inputDataType model=$modelFileName")
     }
@@ -152,7 +127,7 @@ class Upscaler(
         val elapsedMs = measureTimeMillis {
             interpreter.run(inputBuffer, outputBuffer)
         }
-        Log.d(TAG, "Inference ${elapsedMs}ms — delegate=$npuStatus")
+        Log.d(TAG, "Inference ${elapsedMs}ms — delegate=$acceleratorStatus")
 
         outputBuffer.rewind()
         when (outputDataType) {
@@ -236,7 +211,6 @@ class Upscaler(
 
     fun close() {
         interpreter.close()
-        nnApiDelegate?.close(); nnApiDelegate = null
         gpuDelegate?.close(); gpuDelegate = null
     }
 }

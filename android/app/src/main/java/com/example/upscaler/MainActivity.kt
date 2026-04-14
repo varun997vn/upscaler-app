@@ -81,7 +81,7 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
         val new = withContext(Dispatchers.IO) { Upscaler(context, selectedModel, accelerator = accelerator) }
         upscaler = new
         old?.close()
-        status = "Ready [${new.npuStatus}]. " +
+        status = "Ready [${new.acceleratorStatus}]. " +
             "Tile: ${new.inputWidth}x${new.inputHeight} → ${new.outputWidth}x${new.outputHeight}."
     }
 
@@ -189,7 +189,7 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
                         u.upscale(bmp, chosenScale.toFloat())
                     }
                     upscaledBitmap = result.bitmap
-                    status = "Inference ${result.inferenceTimeMs} ms [${u.npuStatus}]. " +
+                    status = "Inference ${result.inferenceTimeMs} ms [${u.acceleratorStatus}]. " +
                         "Output: ${result.bitmap.width}x${result.bitmap.height} (${chosenScale}x)."
                     running = false
                 }
