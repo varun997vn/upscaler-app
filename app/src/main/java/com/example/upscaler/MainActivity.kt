@@ -12,12 +12,15 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -62,6 +65,7 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
     var upscaledBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var status by remember { mutableStateOf("Pick a low-res image to upscale.") }
     var running by remember { mutableStateOf(false) }
+    var scale by remember { mutableStateOf(4) }
 
     val pickImage = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent(),
@@ -77,8 +81,8 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
     }
 
     LaunchedEffect(Unit) {
-        status = "Ready. Model input: ${upscaler.inputWidth}x${upscaler.inputHeight}, " +
-            "output: ${upscaler.outputWidth}x${upscaler.outputHeight}."
+        status = "Ready. Model tile: ${upscaler.inputWidth}x${upscaler.inputHeight} → " +
+            "${upscaler.outputWidth}x${upscaler.outputHeight} (native ${upscaler.modelScale}x)."
     }
 
     Column(
@@ -96,16 +100,39 @@ fun UpscalerScreen(modifier: Modifier = Modifier) {
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Pick image") }
 
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Scale:")
+            listOf(2, 3, 4).forEach { value ->
+                Row(
+                    modifier = Modifier.selectable(
+                        selected = scale == value,
+                        enabled = !running,
+                        onClick = { scale = value },
+                    ),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                ) {
+                    RadioButton(selected = scale == value, onClick = null)
+                    Text("${value}x")
+                }
+            }
+        }
+
         Button(
             onClick = {
                 val bmp = selectedBitmap ?: return@Button
+                val chosenScale = scale
                 running = true
-                status = "Running inference..."
+                status = "Running inference at ${chosenScale}x..."
                 scope.launch {
-                    val result = withContext(Dispatchers.Default) { upscaler.upscale(bmp) }
+                    val result = withContext(Dispatchers.Default) {
+                        upscaler.upscale(bmp, chosenScale.toFloat())
+                    }
                     upscaledBitmap = result.bitmap
                     status = "Inference took ${result.inferenceTimeMs} ms. " +
-                        "Output: ${result.bitmap.width}x${result.bitmap.height}."
+                        "Output: ${result.bitmap.width}x${result.bitmap.height} (${chosenScale}x)."
                     running = false
                 }
             },

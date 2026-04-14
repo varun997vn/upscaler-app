@@ -2,6 +2,7 @@ package com.example.upscaler
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.nnapi.NnApiDelegate
@@ -24,6 +25,7 @@ class Upscaler(
     val inputHeight: Int
     val outputWidth: Int
     val outputHeight: Int
+    val modelScale: Int
 
     init {
         val modelBuffer = loadModelFile(context, modelFileName)
@@ -41,6 +43,7 @@ class Upscaler(
         val outputShape = interpreter.getOutputTensor(0).shape() // [1, H, W, 3]
         outputHeight = outputShape[1]
         outputWidth = outputShape[2]
+        modelScale = outputWidth / inputWidth
     }
 
     private fun loadModelFile(context: Context, fileName: String): MappedByteBuffer {
@@ -77,13 +80,50 @@ class Upscaler(
         return elapsedMs
     }
 
-    fun upscale(bitmap: Bitmap): UpscaleResult {
-        val resized = Bitmap.createScaledBitmap(bitmap, inputWidth, inputHeight, true)
-        val input = bitmapToFloatArray(resized)
+    /**
+     * Upscales [bitmap] by [scale]. The model runs in 50×50 → 200×200 tiles (4× native);
+     * the tiled 4× result is then resampled to match the requested scale factor.
+     */
+    fun upscale(bitmap: Bitmap, scale: Float = modelScale.toFloat()): UpscaleResult {
+        val origW = bitmap.width
+        val origH = bitmap.height
+        val tilesX = ((origW + inputWidth - 1) / inputWidth).coerceAtLeast(1)
+        val tilesY = ((origH + inputHeight - 1) / inputHeight).coerceAtLeast(1)
+        val paddedW = tilesX * inputWidth
+        val paddedH = tilesY * inputHeight
+
+        val padded = if (paddedW == origW && paddedH == origH) bitmap
+        else Bitmap.createScaledBitmap(bitmap, paddedW, paddedH, true)
+
+        val fullW = paddedW * modelScale
+        val fullH = paddedH * modelScale
+        val fullBitmap = Bitmap.createBitmap(fullW, fullH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(fullBitmap)
+
         val output = FloatArray(outputWidth * outputHeight * 3)
-        val elapsedMs = runInference(input, output)
-        val result = floatArrayToBitmap(output, outputWidth, outputHeight)
-        return UpscaleResult(result, elapsedMs)
+        var totalMs = 0L
+        for (ty in 0 until tilesY) {
+            for (tx in 0 until tilesX) {
+                val tile = Bitmap.createBitmap(
+                    padded, tx * inputWidth, ty * inputHeight, inputWidth, inputHeight,
+                )
+                val input = bitmapToFloatArray(tile)
+                totalMs += runInference(input, output)
+                val outTile = floatArrayToBitmap(output, outputWidth, outputHeight)
+                canvas.drawBitmap(
+                    outTile,
+                    (tx * outputWidth).toFloat(),
+                    (ty * outputHeight).toFloat(),
+                    null,
+                )
+            }
+        }
+
+        val targetW = (origW * scale).toInt().coerceAtLeast(1)
+        val targetH = (origH * scale).toInt().coerceAtLeast(1)
+        val result = if (targetW == fullW && targetH == fullH) fullBitmap
+        else Bitmap.createScaledBitmap(fullBitmap, targetW, targetH, true)
+        return UpscaleResult(result, totalMs)
     }
 
     private fun bitmapToFloatArray(bitmap: Bitmap): FloatArray {
